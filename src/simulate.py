@@ -222,3 +222,51 @@ def cox_counting_process(cp, max_iter=50, tol=1e-9):
             "ci_high": np.exp(beta + 1.96 * se),
             "p": np.array([erfc(abs(b / s) / sqrt(2)) for b, s in zip(beta, se)]),
             "loglik": loglik}
+
+
+# ---------------------------------------------------------------------------
+# Competing risks
+# ---------------------------------------------------------------------------
+# Truths for the competing-risks cohort. Treatment reduces the CAUSE-SPECIFIC
+# hazard of the event of interest and does NOTHING to the competing hazard --
+# the configuration that separates the two regression models, because keeping
+# patients alive longer leaves them at risk for longer and blunts the effect on
+# cumulative incidence.
+TRUE_HR_CAUSE_SPECIFIC = 0.60
+TRUE_HR_COMPETING = 1.00
+BASELINE_CAUSE = 0.030          # per month, event of interest
+BASELINE_COMPETING = 0.028      # per month, competing death
+
+
+def simulate_competing_risks(n=1600, seed=53):
+    """Two competing causes. Returns event_type: 0 censored, 1 cause, 2 competing.
+
+    The competing hazard is deliberately LARGE relative to the cause of
+    interest, because that is when 1-KM goes most wrong -- and it is the
+    realistic case in an older population, where most people die of something
+    other than the disease being studied.
+    """
+    rng = np.random.default_rng(seed)
+    arm = rng.integers(0, 2, n)
+    age = np.clip(rng.normal(70, 9, n), 45, 95)
+
+    h_cause = (BASELINE_CAUSE * np.exp(np.log(TRUE_HR_CAUSE_SPECIFIC) * arm
+                                       + 0.020 * (age - 70)))
+    h_comp = (BASELINE_COMPETING * np.exp(np.log(TRUE_HR_COMPETING) * arm
+                                          + 0.055 * (age - 70)))
+
+    t_cause = rng.exponential(1 / h_cause)
+    t_comp = rng.exponential(1 / h_comp)
+    admin = np.full(n, STUDY_MONTHS)
+    dropout = rng.exponential(1 / 0.004, n)
+    censor = np.minimum(admin, dropout)
+
+    obs = np.minimum(np.minimum(t_cause, t_comp), censor)
+    event_type = np.where((t_cause <= t_comp) & (t_cause <= censor), 1,
+                 np.where((t_comp < t_cause) & (t_comp <= censor), 2, 0))
+
+    return {"time": obs, "event_type": event_type, "arm": arm, "age": age,
+            "truth": {"hr_cause_specific": TRUE_HR_CAUSE_SPECIFIC,
+                      "hr_competing": TRUE_HR_COMPETING,
+                      "baseline_cause": BASELINE_CAUSE,
+                      "baseline_competing": BASELINE_COMPETING}}

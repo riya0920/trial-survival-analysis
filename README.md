@@ -1,4 +1,4 @@
-# DATA-3 — Trial analysis with survival methods (first 20%)
+# DATA-3 — Trial analysis with survival methods (~50% build)
 
 Kaplan-Meier, log-rank, Cox proportional hazards, and Schoenfeld-residual PH
 testing **implemented rather than imported** (lifelines is not installed), and
@@ -9,12 +9,12 @@ analysed wrongly and then correctly, where treatment provably does nothing.
 
 ```bash
 python run_analysis.py     # Table 1, KM, Cox, PH, immortal time -> out/*.png
-python -m pytest tests -q  # 19 tests
+python -m pytest tests -q  # 29 tests
 ```
 
 ---
 
-## The four things worth reading
+## The six things worth reading
 
 ### 1. Immortal time bias, wrong then right
 
@@ -116,6 +116,73 @@ handles that branch. Each remedy changes what can be claimed:
 that reverses over time and asserts the diagnostic catches it — otherwise the
 test above is decoration.
 
+### 5. Competing risks: where 1 − KM goes wrong, and by how much
+
+The spec offers competing risks *or* immortal time as the methods showcase. The
+first build chose immortal time; this adds the other.
+
+Treating a competing event as censored and reading 1 − KM as cumulative
+incidence is not a subtle error. Censoring assumes the removed patient could
+still have the event later — but a patient who died of something else cannot
+later die of this. The risk gets redistributed to the survivors, so the estimate
+is **always biased upward, and the bias grows with follow-up**:
+
+| horizon | Aalen-Johansen CIF | 1 − KM (wrong) | absolute | relative |
+|---|---|---|---|---|
+| 12 mo | 0.212 | 0.254 | +0.042 | +19.7% |
+| 24 mo | 0.330 | 0.454 | +0.124 | +37.4% |
+| 36 mo | 0.389 | 0.590 | +0.201 | +51.7% |
+| **48 mo** | **0.412** | **0.662** | **+0.250** | **+60.8%** |
+
+At 48 months the naive estimator claims 66.2% of patients have had the event
+when the truth is 41.2%. See `out/competing_risks.png` — the shaded gap *is* the
+error.
+
+The competing hazard here is deliberately **larger** than the event of interest,
+which is the realistic case in an older population and precisely when this goes
+most wrong.
+
+**Two regression models, two different questions** — people argue about these as
+though one is right:
+
+| model | HR (treatment) | 95% CI |
+|---|---|---|
+| cause-specific (aetiological) | 0.675 | 0.58–0.79 |
+| Fine-Gray (subdistribution) | 0.711 | 0.61–0.83 |
+| *planted cause-specific truth* | *0.600* | *covered ✓* |
+
+The Fine-Gray HR is **attenuated toward 1**, and that is not an error in either
+model. Cause-specific asks *"among patients still at risk, does treatment change
+the rate?"*. Fine-Gray asks *"does treatment change the probability of ever
+having had this event by time t?"*. The treatment lowers the rate — but by
+keeping patients alive it leaves them at risk longer, which partly offsets the
+effect on cumulative incidence. `test_fine_gray_is_attenuated_toward_one` pins
+the relationship.
+
+Which to report follows from the question: **mechanism → cause-specific;
+absolute risk, resource allocation, or what to tell a patient → Fine-Gray.**
+Reporting one and interpreting it as the other is how a treatment that changes
+nobody's actual chance of the event gets described as reducing it by a third.
+
+### 6. RMST — no PH assumption, and in units a patient understands
+
+The first build recommended restricted mean survival time as the remedy when PH
+fails and did not implement it.
+
+```
+tau = 36 months (PRE-SPECIFIED)
+  treatment RMST   16.93 months
+  control RMST     14.24 months
+  difference       +2.68 months (+1.11, +4.22)
+```
+
+*"Over the first three years, a patient on treatment lives on average 2.7 months
+longer."* That sentence needs no proportional-hazards assumption and no
+explanation of what a hazard is.
+
+τ must be **pre-specified** — different horizons give different answers, so
+choosing it after seeing the curves lets the analyst pick the flattering one.
+
 ### Plus: pre-specified vs exploratory
 
 The writeup separates them, and the separation is *conditional on what actually
@@ -146,11 +213,9 @@ the at-risk table is mandatory.
 - **Efron tie handling is not implemented.** Breslow only. With heavy ties
   Breslow biases coefficients toward zero; Efron is the better default and its
   absence is stated in the docstring rather than hidden.
-- **No competing-risks analysis.** The spec offers immortal time *or* competing
-  risks as the methods showcase and this build chose immortal time. Fine-Gray
-  and cause-specific hazards — and the fact that they answer different
-  questions — are absent.
-- **No RMST**, despite the code recommending it as a PH remedy.
+- **Fine-Gray uses a simplified IPCW scheme** — right-censoring-complete
+  weights and Breslow ties. A production implementation (R's `cmprsk`) handles
+  left-truncation and time-varying weights more carefully.
 - **No formal CONSORT diagram**, no participant flow, no protocol document.
 - **No multiplicity handling**, no interim analysis, no alpha spending.
 - **The PH test is a simplified Grambsch-Therneau** — correlation of
@@ -169,5 +234,7 @@ the at-risk table is mandatory.
 | `src/simulate.py` | trial simulation with known HR; immortal-time cohort; counting-process split |
 | `run_analysis.py` | Table 1, censoring, KM, Cox, PH, immortal time, pre-specified vs exploratory |
 | `out/km_curve.png` | KM with number-at-risk table and Greenwood bands |
+| `src/competing_risks.py` | Aalen-Johansen CIF, cause-specific and Fine-Gray Cox, RMST |
 | `out/immortal_time.png` | the wrong-then-right figure pair |
-| `tests/test_survival.py` | 19 tests |
+| `out/competing_risks.png` | the shaded gap between CIF and 1 − KM |
+| `tests/test_survival.py` | 29 tests |

@@ -228,3 +228,100 @@ def test_nobody_contributes_treated_time_before_being_treated():
     assert (cp["start"][cp["treated"] == 1] > 0).all(), (
         "a treated interval starting at time 0 means someone was counted as "
         "treated before treatment began")
+
+
+# ---------------------------------------------------------------------------
+# Competing risks and RMST
+# ---------------------------------------------------------------------------
+import competing_risks as CR
+
+
+def test_cif_never_exceeds_one_minus_km():
+    """The direction of the error is not negotiable: treating competing events
+    as censored ALWAYS overestimates cumulative incidence, because censoring
+    assumes the removed patient could still have the event later."""
+    z = simulate.simulate_competing_risks(n=1200, seed=61)
+    rows, _c, _n = CR.compare_naive_vs_cif(z["time"], z["event_type"], 1)
+    for r in rows:
+        assert r["naive_1_minus_km"] >= r["cif"] - 1e-9, r
+        assert r["absolute_overestimate"] >= -1e-9
+
+
+def test_the_overestimate_grows_with_follow_up():
+    z = simulate.simulate_competing_risks(n=1200, seed=61)
+    rows, _c, _n = CR.compare_naive_vs_cif(z["time"], z["event_type"], 1,
+                                           horizons=(12, 24, 36, 48))
+    overs = [r["absolute_overestimate"] for r in rows]
+    assert overs == sorted(overs), f"overestimate should grow: {overs}"
+
+
+def test_cif_is_a_valid_probability_and_monotone():
+    z = simulate.simulate_competing_risks(n=800, seed=63)
+    _t, cif = CR.aalen_johansen(z["time"], z["event_type"], 1)
+    assert (cif >= 0).all() and (cif <= 1).all()
+    assert np.all(np.diff(cif) >= -1e-12), "CIF must be non-decreasing"
+
+
+def test_cifs_of_all_causes_sum_to_one_minus_overall_survival():
+    """The identity that makes cumulative incidence coherent: every patient
+    either has cause 1, has cause 2, or is still event-free."""
+    z = simulate.simulate_competing_risks(n=1000, seed=67)
+    t1, c1 = CR.aalen_johansen(z["time"], z["event_type"], 1)
+    t2, c2 = CR.aalen_johansen(z["time"], z["event_type"], 2)
+    any_event = (z["event_type"] > 0).astype(int)
+    ts, s, _a, _d, _se = S.kaplan_meier(z["time"], any_event)
+    horizon = 30.0
+    def at(ts_, v, h):
+        i = np.searchsorted(ts_, h, side="right") - 1
+        return v[i] if i >= 0 else 0.0
+    total = at(t1, c1, horizon) + at(t2, c2, horizon)
+    assert abs(total - (1 - at(ts, s, horizon))) < 0.02
+
+
+def test_cause_specific_cox_recovers_the_planted_hazard_ratio():
+    z = simulate.simulate_competing_risks(n=2500, seed=71)
+    X = np.column_stack([z["arm"], (z["age"] - 70) / 10])
+    fit = CR.cause_specific_cox(z["time"], z["event_type"], X, cause=1)
+    truth = z["truth"]["hr_cause_specific"]
+    assert fit["ci_low"][0] <= truth <= fit["ci_high"][0], (
+        f"true {truth} outside ({fit['ci_low'][0]:.3f}, {fit['ci_high'][0]:.3f})")
+
+
+def test_fine_gray_is_attenuated_toward_one_relative_to_cause_specific():
+    """Not a bug in either: the treatment lowers the RATE among those at risk,
+    but by keeping patients alive it leaves them at risk longer, which partly
+    offsets the effect on the PROBABILITY of ever having the event."""
+    z = simulate.simulate_competing_risks(n=2500, seed=71)
+    X = np.column_stack([z["arm"], (z["age"] - 70) / 10])
+    cs = CR.cause_specific_cox(z["time"], z["event_type"], X, cause=1)
+    fg = CR.fine_gray(z["time"], z["event_type"], X, cause=1)
+    assert cs["hr"][0] < fg["hr"][0] < 1.0
+
+
+def test_rmst_of_a_curve_that_never_drops_is_tau():
+    time = np.full(200, 100.0)
+    event = np.zeros(200, dtype=int)
+    assert CR.rmst(time, event, tau=36) == pytest.approx(36.0, abs=1e-6)
+
+
+def test_rmst_is_bounded_by_tau():
+    d = simulate.simulate_trial(n=600, seed=73)
+    for tau in (12, 24, 36):
+        assert 0 <= CR.rmst(d["time"], d["event"], tau) <= tau
+
+
+def test_rmst_difference_detects_a_real_treatment_effect():
+    d = simulate.simulate_trial(n=1500, seed=77)
+    r = CR.rmst_difference(d["time"], d["event"], d["arm"], tau=36, n_boot=200)
+    assert r["difference"] > 0          # generator gives treatment HR 0.70
+    assert r["significant"] is True
+
+
+def test_rmst_difference_finds_nothing_when_arms_are_identical():
+    rng = np.random.default_rng(83)
+    n = 1200
+    time = rng.exponential(20, n)
+    event = np.ones(n, dtype=int)
+    arm = rng.integers(0, 2, n)         # arm assigned independently of outcome
+    r = CR.rmst_difference(time, event, arm, tau=24, n_boot=200)
+    assert r["lo"] <= 0 <= r["hi"]

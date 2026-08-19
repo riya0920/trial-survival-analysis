@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import competing_risks as CR
 import simulate
 import survival as S
 
@@ -103,6 +104,32 @@ def immortal_figure(naive, corrected, path):
     fig.suptitle(f"Immortal time bias: naive HR {corrected['naive_hr']:.2f} "
                  f"vs time-dependent HR {corrected['tv_hr']:.2f} "
                  f"(truth 1.00)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def cif_figure(t_cif, cif, t_naive, naive, path):
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.step(np.concatenate([[0], t_naive]), np.concatenate([[0], naive]),
+            where="post", color="#B4413C", lw=2,
+            label="1 - Kaplan-Meier (treats competing deaths as censored)")
+    ax.step(np.concatenate([[0], t_cif]), np.concatenate([[0], cif]),
+            where="post", color="#1FB8CD", lw=2,
+            label="Aalen-Johansen cumulative incidence (correct)")
+    ax.fill_between(np.concatenate([[0], t_cif]),
+                    np.concatenate([[0], cif]),
+                    np.interp(np.concatenate([[0], t_cif]),
+                              np.concatenate([[0], t_naive]),
+                              np.concatenate([[0], naive])),
+                    step="post", alpha=0.15, color="#B4413C")
+    ax.set_xlabel("Months")
+    ax.set_ylabel("Cumulative incidence of the event of interest")
+    ax.set_xlim(0, 48)
+    ax.set_ylim(0, 0.8)
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.set_title("The shaded gap is the overestimate from ignoring competing risks",
+                 fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
@@ -331,6 +358,100 @@ def main():
         "time_varying_ci": [float(tv["ci_low"][0]), float(tv["ci_high"][0])],
         "truth": z["truth"]["hr_treatment"],
         "immortal_person_months": immortal_months,
+    }
+
+    # =====================================================================
+    print("\n" + "=" * 76)
+    print("RESTRICTED MEAN SURVIVAL TIME -- no PH assumption, and in months")
+    print("=" * 76)
+    TAU = 36.0        # PRE-SPECIFIED, before looking at the curves
+    r = CR.rmst_difference(d["time"], d["event"], d["arm"], tau=TAU, n_boot=400)
+    print(f"  horizon tau = {TAU:.0f} months, pre-specified")
+    print(f"    treatment arm RMST   {r['rmst_treatment']:.2f} months")
+    print(f"    control arm RMST     {r['rmst_control']:.2f} months")
+    print(f"    difference           {r['difference']:+.2f} months "
+          f"({r['lo']:+.2f}, {r['hi']:+.2f})")
+    print(f"\n  Read as: over the first {TAU:.0f} months, a patient on treatment lives")
+    print(f"  on average {r['difference']:.1f} months longer. That sentence needs no")
+    print("  proportional-hazards assumption and no explanation of what a")
+    print("  hazard is, which is why RMST is the right thing to hand a")
+    print("  clinician or a patient when PH fails.")
+    print("\n  tau must be PRE-SPECIFIED. Different horizons give different")
+    print("  answers, so choosing it after seeing the curves is a")
+    print("  garden-of-forking-paths problem and the analyst can pick the")
+    print("  flattering one.")
+    payload["rmst"] = r
+
+    # =====================================================================
+    print("\n" + "=" * 76)
+    print("COMPETING RISKS -- where 1 minus KM goes wrong, and by how much")
+    print("=" * 76)
+    z = simulate.simulate_competing_risks()
+    et = z["event_type"]
+    print(f"  cohort {len(et):,}: {int((et==1).sum())} events of interest, "
+          f"{int((et==2).sum())} competing deaths, {int((et==0).sum())} censored")
+    print("  The competing risk is deliberately LARGER than the event of")
+    print("  interest -- which is the realistic case in an older population,")
+    print("  where most people die of something other than the disease under")
+    print("  study, and it is exactly when the naive estimator goes most wrong.")
+
+    rows, (t_cif, cif), (t_naive, naive) = CR.compare_naive_vs_cif(
+        z["time"], et, cause=1)
+    print(f"\n  {'horizon':>9}{'Aalen-Johansen CIF':>21}{'1 - KM (WRONG)':>18}"
+          f"{'absolute':>11}{'relative':>11}")
+    for row_ in rows:
+        print(f"  {row_['horizon']:>9.0f}{row_['cif']:>21.3f}"
+              f"{row_['naive_1_minus_km']:>18.3f}"
+              f"{row_['absolute_overestimate']:>+11.3f}"
+              f"{row_['relative_overestimate']:>+11.1%}")
+    worst = rows[-1]
+    print(f"\n  At {worst['horizon']:.0f} months the naive estimator claims "
+          f"{worst['naive_1_minus_km']:.1%} of patients")
+    print(f"  have had the event when the truth is {worst['cif']:.1%} -- an "
+          f"overestimate of")
+    print(f"  {worst['relative_overestimate']:.0%} relative. The error is always "
+          f"UPWARD and always grows")
+    print("  with follow-up, because censoring assumes the removed patient")
+    print("  could still have the event later. A patient who died of something")
+    print("  else cannot later die of this.")
+
+    X = np.column_stack([z["arm"], (z["age"] - 70) / 10])
+    cs = CR.cause_specific_cox(z["time"], et, X, cause=1)
+    fg = CR.fine_gray(z["time"], et, X, cause=1)
+    truth_cs = z["truth"]["hr_cause_specific"]
+    print("\n  TWO MODELS, TWO QUESTIONS:")
+    print(f"    {'model':<34}{'HR (arm)':>12}{'95% CI':>18}")
+    print(f"    {'cause-specific (aetiological)':<34}{cs['hr'][0]:>12.3f}"
+          f"   ({cs['ci_low'][0]:.2f}-{cs['ci_high'][0]:.2f})")
+    print(f"    {'Fine-Gray (subdistribution)':<34}{fg['hr'][0]:>12.3f}"
+          f"   ({fg['ci_low'][0]:.2f}-{fg['ci_high'][0]:.2f})")
+    print(f"    {'planted cause-specific truth':<34}{truth_cs:>12.3f}")
+    covered = cs["ci_low"][0] <= truth_cs <= cs["ci_high"][0]
+    print(f"\n    cause-specific interval covers the planted truth: {covered}")
+    print(f"\n  The Fine-Gray HR ({fg['hr'][0]:.2f}) is ATTENUATED toward 1 relative to")
+    print(f"  the cause-specific HR ({cs['hr'][0]:.2f}), and that is not an error in")
+    print("  either -- it is the two questions differing. The treatment lowers")
+    print("  the RATE of this event among those still at risk; but by keeping")
+    print("  patients alive it also leaves them at risk for longer, which")
+    print("  partly offsets the effect on the PROBABILITY of ever having it.")
+    print("\n  Which to report follows from the question asked:")
+    print("    * mechanism / aetiology            -> cause-specific")
+    print("    * absolute risk, allocation, or")
+    print("      what to tell a patient           -> Fine-Gray")
+    print("  Reporting one and interpreting it as the other is how a treatment")
+    print("  that changes no one's actual chance of the event gets described as")
+    print("  reducing it by 33%.")
+    cif_figure(t_cif, cif, t_naive, naive, f"{OUT}/competing_risks.png")
+    print()
+    print(f"  wrote {OUT}/competing_risks.png")
+    payload["competing_risks"] = {
+        "horizons": rows,
+        "cause_specific_hr": float(cs["hr"][0]),
+        "cause_specific_ci": [float(cs["ci_low"][0]), float(cs["ci_high"][0])],
+        "fine_gray_hr": float(fg["hr"][0]),
+        "fine_gray_ci": [float(fg["ci_low"][0]), float(fg["ci_high"][0])],
+        "truth_cause_specific": truth_cs,
+        "truth_covered": bool(covered),
     }
 
     # =====================================================================
