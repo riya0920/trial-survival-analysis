@@ -204,7 +204,7 @@ comment, and the point it illustrates — that a KM value of 0% resting on one
 patient is not the same statement as 0% resting on two hundred — is the reason
 the at-risk table is mandatory.
 
-## What is missing (the other 80%)
+## What is still missing
 
 - **No real dataset.** Everything is simulated. That is the strongest option
   for *verifying methods*, and it is worthless for demonstrating that the
