@@ -1,4 +1,4 @@
-# DATA-3 — Trial analysis with survival methods (~50% build)
+# DATA-3 — Trial analysis with survival methods (~80% build)
 
 Kaplan-Meier, log-rank, Cox proportional hazards, and Schoenfeld-residual PH
 testing **implemented rather than imported** (lifelines is not installed), and
@@ -9,7 +9,9 @@ analysed wrongly and then correctly, where treatment provably does nothing.
 
 ```bash
 python run_analysis.py     # Table 1, KM, Cox, PH, immortal time -> out/*.png
-python -m pytest tests -q  # 29 tests
+python run_ties.py --reps 60   # Efron vs Breslow against a planted HR
+python write_report.py         # -> docs/ANALYSIS_REPORT.md
+python -m pytest tests -q      # 45 tests
 ```
 
 ---
@@ -204,19 +206,115 @@ comment, and the point it illustrates — that a KM value of 0% resting on one
 patient is not the same statement as 0% resting on two hundred — is the reason
 the at-risk table is mandatory.
 
+## Efron tie handling, and the claim it replaced
+
+The gap list said: *"Efron tie handling is not implemented. Breslow only. With
+heavy ties Breslow biases coefficients toward zero."* The docstring justified
+Breslow on the grounds that "the difference is negligible unless ties are
+heavy". That is the received wisdom, it is probably true, **and it had never
+been checked.**
+
+Efron is now implemented and is the default. `run_ties.py` checks the claim by
+simulating from a planted hazard ratio and then rounding the *same* event times
+onto coarser grids — which is not an artificial manipulation, since trial data
+arrives on a day grid and registry and claims data arrive on a month grid.
+
+| grid | % events tied | largest tie | Breslow HR | Efron HR |
+|---|---|---|---|---|
+| continuous | 0.0% | 1 | 0.7346 | 0.7346 |
+| daily | 29.7% | 3 | 0.7348 | 0.7346 |
+| weekly | 83.5% | 9 | 0.7357 | 0.7344 |
+| monthly | 98.2% | 30 | 0.7405 | 0.7347 |
+| quarterly | 99.7% | 83 | **0.7524** | **0.7347** |
+
+With no ties the two agree to `0.00e+00` — they are the same expression when
+every event time is unique, which is the first thing to confirm before
+believing any difference elsewhere.
+
+**The attenuation is measured against the tie-free estimate on the same data,
+not against the planted HR.** Both estimators sit near 0.735 against a planted
+0.70 even with no ties; that is finite-sample bias at n=400 and has nothing to
+do with tie handling. The first version of this report quoted
+distance-from-truth and so silently attributed that bias to Breslow. Isolated
+properly:
+
+| grid | Breslow drift | Efron drift |
+|---|---|---|
+| monthly | +0.0059 | +0.0001 |
+| quarterly | **+0.0179** | **+0.0001** |
+
+**Efron is very nearly invariant to the grid**, which is the property worth
+having: an estimate should depend on the data, not on how coarsely somebody
+recorded the dates.
+
+The direction is what matters. Breslow uses the full risk set for every death
+in a tied set, double-counting subjects who have already failed, inflating the
+denominator and biasing toward the null. In a trial, attenuation understates a
+treatment benefit — conservative — and understates a **harm** signal by exactly
+as much, which is not conservative at all.
+
+## CONSORT flow, and why a simulated one is almost a lie
+
+`src/consort.py`. The CONSORT diagram exists to make participant loss visible,
+and its value is entirely in the numbers it is uncomfortable to publish. **None
+of that is observed here** — every attrition figure is one I chose, so a
+generated diagram cannot demonstrate that a trial retained its participants.
+
+What does generalise is the invariant: *every randomised participant appears in
+exactly one terminal state, and the arithmetic closes at every stage.*
+`validate()` refuses to emit a diagram that fails it, and each check
+corresponds to a way real trial reports break rather than a way this generator
+might:
+
+- **allocation not summing to randomised** — someone randomised and then absent
+  from the diagram entirely, the most serious failure because nothing
+  downstream shows it;
+- **ITT larger than allocated** — an analysis population that grew after
+  randomisation, usually from a post-unblinding reclassification;
+- **per-protocol larger than ITT** — impossible by construction, and a sign two
+  denominators have been mixed;
+- **negative completion** — a participant counted in two discontinuation
+  reasons.
+
+The ITT/per-protocol distinction is stated where it is most often misstated:
+per-protocol is **not** "the cleaner analysis", it is the biased one. Adherence
+is a post-randomisation outcome, so conditioning on it reintroduces exactly the
+confounding randomisation was there to remove.
+
+## A generated analysis report
+
+`write_report.py` → [`docs/ANALYSIS_REPORT.md`](docs/ANALYSIS_REPORT.md). Every
+number is computed at build time; none is typed. A report with hand-entered
+numbers disagrees with the code after the first re-run, and in a trial context
+a stale number is not a typo — it is the thing regulators and journals read.
+
+Structured as a statistical analysis plan, because the ordering carries
+meaning: analysis population before result, assumption check before the
+estimate that depends on it, limitations attached to the estimate rather than
+collected in a footnote. It also **reports its own gap** where one exists — the
+median survival has no confidence interval, and the report says so and explains
+why (a Brookmeyer–Crowley inversion of the Greenwood variance, not implemented)
+rather than quietly presenting a point estimate.
+
 ## What is still missing
 
 - **No real dataset.** Everything is simulated. That is the strongest option
   for *verifying methods*, and it is worthless for demonstrating that the
   methods survive real data — no non-exponential baseline hazard, no
   competing risks, no crossover, no missing covariates, no protocol deviations.
-- **Efron tie handling is not implemented.** Breslow only. With heavy ties
-  Breslow biases coefficients toward zero; Efron is the better default and its
-  absence is stated in the docstring rather than hidden.
+- **Exact tie handling is not implemented.** Efron is the default and Breslow
+  is available; the exact marginal likelihood over orderings is not, and is
+  what you want when a tied set is large relative to the risk set.
 - **Fine-Gray uses a simplified IPCW scheme** — right-censoring-complete
   weights and Breslow ties. A production implementation (R's `cmprsk`) handles
   left-truncation and time-varying weights more carefully.
-- **No formal CONSORT diagram**, no participant flow, no protocol document.
+- **The CONSORT attrition is chosen, not observed.** There is no screening
+  log, no eligibility criteria, no site structure, no randomisation schedule or
+  allocation concealment, no blinding, no protocol document, and no
+  adverse-event accounting — the safety population is a different denominator
+  again and is not modelled.
+- **No confidence interval on median survival.** Flagged in the generated
+  report where it appears rather than left for a reader to notice.
 - **No multiplicity handling**, no interim analysis, no alpha spending.
 - **The PH test is a simplified Grambsch-Therneau** — correlation of
   unscaled Schoenfeld residuals with ranked time, not the scaled residuals with
@@ -237,4 +335,8 @@ the at-risk table is mandatory.
 | `src/competing_risks.py` | Aalen-Johansen CIF, cause-specific and Fine-Gray Cox, RMST |
 | `out/immortal_time.png` | the wrong-then-right figure pair |
 | `out/competing_risks.png` | the shaded gap between CIF and 1 − KM |
+| `src/consort.py` | participant flow, and the accounting invariant it enforces |
+| `run_ties.py` | Efron vs Breslow across event-time grids |
+| `write_report.py` | the generated statistical report |
+| `tests/test_ties_consort.py` | 16 tests: tie recovery, and six ways a CONSORT flow breaks |
 | `tests/test_survival.py` | 29 tests |

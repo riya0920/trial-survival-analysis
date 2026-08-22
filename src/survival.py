@@ -134,16 +134,39 @@ def logrank(time, event, group):
 # ---------------------------------------------------------------------------
 # Cox proportional hazards
 # ---------------------------------------------------------------------------
-def cox_ph(time, event, X, max_iter=50, tol=1e-9):
-    """Cox PH by Newton-Raphson on the Breslow partial likelihood.
+def cox_ph(time, event, X, max_iter=50, tol=1e-9, ties="efron"):
+    """Cox PH by Newton-Raphson on the partial likelihood.
 
-    Breslow rather than Efron for tie handling: it is the simpler expression
-    and the difference is negligible unless ties are heavy. With heavy ties
-    Breslow biases coefficients toward zero, so the choice is stated rather
-    than left implicit -- Efron is the better default in a real tool.
+    TIE HANDLING: "efron" (default) or "breslow".
 
-    Returns dict with beta, se, hr, ci, z, p, loglik.
+    The partial likelihood is unambiguous only when no two events share a time.
+    They always do in practice, because time is recorded in days and a trial
+    with 300 events over 60 months has ties on most event days. Both methods
+    are approximations to the exact marginal likelihood over the possible
+    orderings within a tied set; they differ in how the risk set is handled for
+    the second and subsequent deaths at the same instant.
+
+    BRESLOW uses the full risk set for every death in the tied set, which
+    double-counts subjects who have already failed. That inflates the
+    denominator, and the effect is to bias coefficients TOWARD ZERO -- so a
+    treatment effect is understated, which is the direction that matters for a
+    trial: it is conservative for efficacy and anti-conservative for harm.
+
+    EFRON subtracts the average contribution of the already-failed members of
+    the tied set, weight l/d on the l-th death. It is closer to the exact
+    calculation, costs one extra inner loop, and is the default in R's
+    `survival::coxph` and in `lifelines`. It is now the default here too.
+
+    The old default was Breslow, on the argument that "the difference is
+    negligible unless ties are heavy". That argument was never checked. It is
+    checked now, in `tests/test_efron.py` and in `run_analysis.py`, against a
+    planted hazard ratio and a deliberately coarse time grid -- and with monthly
+    rounding the Breslow estimate is measurably attenuated relative to Efron.
+
+    Returns dict with beta, se, hr, ci, z, p, loglik, ties.
     """
+    if ties not in ("efron", "breslow"):
+        raise ValueError(f"ties must be 'efron' or 'breslow', got {ties!r}")
     from math import erfc, exp, log, sqrt
     time = np.asarray(time, dtype=float)
     event = np.asarray(event, dtype=int)
@@ -181,13 +204,37 @@ def cox_ph(time, event, X, max_iter=50, tol=1e-9):
             d_idx = [k for k in range(i, j) if event[k] == 1]
             d = len(d_idx)
             if d:
-                zbar = s1 / s0
                 for k in d_idx:
                     loglik += X[k] @ beta
                     grad += X[k]
-                loglik -= d * log(s0)
-                grad -= d * zbar
-                hess -= d * (s2 / s0 - np.outer(zbar, zbar))
+                if ties == "breslow" or d == 1:
+                    # full risk set for every death in the tied set
+                    zbar = s1 / s0
+                    loglik -= d * log(s0)
+                    grad -= d * zbar
+                    hess -= d * (s2 / s0 - np.outer(zbar, zbar))
+                else:
+                    # EFRON: for the l-th of d tied deaths, remove l/d of the
+                    # tied set's own contribution from the risk set. The first
+                    # death sees the whole risk set; the last sees it with the
+                    # tied deaths almost entirely removed, which is the average
+                    # over the orderings Breslow ignores.
+                    td0 = sum(theta[k] for k in d_idx)
+                    td1 = np.zeros(p)
+                    td2 = np.zeros((p, p))
+                    for k in d_idx:
+                        w = theta[k]
+                        td1 += w * X[k]
+                        td2 += w * np.outer(X[k], X[k])
+                    for l in range(d):
+                        f = l / d
+                        r0 = s0 - f * td0
+                        r1 = s1 - f * td1
+                        r2 = s2 - f * td2
+                        zbar = r1 / r0
+                        loglik -= log(r0)
+                        grad -= zbar
+                        hess -= (r2 / r0 - np.outer(zbar, zbar))
             i = j
 
         try:
@@ -207,7 +254,7 @@ def cox_ph(time, event, X, max_iter=50, tol=1e-9):
     return {
         "beta": beta, "se": se, "hr": np.exp(beta),
         "ci_low": np.exp(beta - 1.96 * se), "ci_high": np.exp(beta + 1.96 * se),
-        "z": z, "p": np.array(pval), "loglik": loglik, "cov": cov,
+        "z": z, "p": np.array(pval), "loglik": loglik, "ties": ties, "cov": cov,
     }
 
 
