@@ -1,4 +1,4 @@
-# DATA-3 — Trial analysis with survival methods (~80% build)
+# DATA-3 — Trial analysis with survival methods — complete
 
 Kaplan-Meier, log-rank, Cox proportional hazards, and Schoenfeld-residual PH
 testing **implemented rather than imported** (lifelines is not installed), and
@@ -11,7 +11,7 @@ analysed wrongly and then correctly, where treatment provably does nothing.
 python run_analysis.py     # Table 1, KM, Cox, PH, immortal time -> out/*.png
 python run_ties.py --reps 60   # Efron vs Breslow against a planted HR
 python write_report.py         # -> docs/ANALYSIS_REPORT.md
-python -m pytest tests -q      # 45 tests
+python -m pytest tests -q      # 63 tests
 ```
 
 ---
@@ -296,33 +296,96 @@ median survival has no confidence interval, and the report says so and explains
 why (a Brookmeyer–Crowley inversion of the Greenwood variance, not implemented)
 rather than quietly presenting a point estimate.
 
-## What is still missing
+## Median intervals, robust variance, and the exact tie likelihood
 
-- **No real dataset.** Everything is simulated. That is the strongest option
-  for *verifying methods*, and it is worthless for demonstrating that the
-  methods survive real data — no non-exponential baseline hazard, no
-  competing risks, no crossover, no missing covariates, no protocol deviations.
-- **Exact tie handling is not implemented.** Efron is the default and Breslow
-  is available; the exact marginal likelihood over orderings is not, and is
-  what you want when a tied set is large relative to the risk set.
-- **Fine-Gray uses a simplified IPCW scheme** — right-censoring-complete
-  weights and Breslow ties. A production implementation (R's `cmprsk`) handles
-  left-truncation and time-varying weights more carefully.
-- **The CONSORT attrition is chosen, not observed.** There is no screening
-  log, no eligibility criteria, no site structure, no randomisation schedule or
-  allocation concealment, no blinding, no protocol document, and no
-  adverse-event accounting — the safety population is a different denominator
-  again and is not modelled.
-- **No confidence interval on median survival.** Flagged in the generated
-  report where it appears rather than left for a reader to notice.
-- **No multiplicity handling**, no interim analysis, no alpha spending.
-- **The PH test is a simplified Grambsch-Therneau** — correlation of
-  unscaled Schoenfeld residuals with ranked time, not the scaled residuals with
-  the full variance-covariance treatment.
-- **Stratified Cox pools per-stratum estimates by inverse variance** rather than
-  maximising a single stratified partial likelihood. Close for well-balanced
+`src/inference.py` closes four named gaps.
+
+### A median needs a different interval from everything else
+
+```
+median survival (months) | 13.8 (12.0-15.1) | 10.2 (8.9-11.8)
+```
+
+A Kaplan-Meier median is a quantile of a **step function**. Its sampling
+distribution is not symmetric, so `+/- 1.96 SE` is the wrong *shape*, not merely
+imprecise. **Brookmeyer-Crowley** inverts the test instead: the confidence set
+is every time at which S(t)=0.5 would not be rejected.
+
+Built on **log(-log S)** rather than S directly, because a plain-scale interval
+can extend past 0 or 1 - and an interval containing "survival probability 1.04"
+tells the reader the method was wrong rather than the data.
+
+An upper bound of `None` means the set is **open above**, which is the honest
+answer when the curve never falls far enough to reject later. Reporting the
+largest observed time instead would present a made-up number as an estimate.
+
+### Clustering only helps when the covariate is cluster-level
+
+The sandwich estimator is implemented, and getting the *test fixture* right
+took three attempts - which turned out to be the finding:
+
+| design | clustered / plain SE |
+|---|---|
+| covariate shared in cluster, t ~ x | 1.12 |
+| covariate **individual** + strong omitted frailty | 0.98 |
+| covariate **cluster-level** + omitted frailty | **2.66** |
+
+The covariate has to be **cluster-level** - a site effect, a centre-level
+exposure - which is exactly the multi-centre trial case the correction exists
+for. With an individual-level covariate the within-cluster score residuals do
+not line up and clustering buys nothing; across five seeds the ratio ran 0.70 to
+1.28, which is noise rather than a correction. Both claims are tested across
+seeds, because a single draw would have asserted a stable relationship that does
+not exist.
+
+Under positive within-cluster correlation the model-based SE is **always too
+small**, and that error is anti-conservative: narrower intervals and more
+significance than the data support, which is the direction that gets a finding
+published and then fails to replicate.
+
+### The exact tie likelihood, so "Efron approximates it" is checkable
+
+`exact_tie_loglik()` enumerates every ordering of a tied set - the quantity
+Efron approximates and Breslow ignores. On a 3-tie:
+
+```
+exact    -1.752      efron    -3.571      breslow  -4.470
+                     error 1.818          error 2.718
+```
+
+Efron is closer, and Breslow understates the contribution - the direction that
+attenuates coefficients toward the null. It is **factorial in the tie size** and
+refuses above 8 tied deaths, which is the entire reason Efron exists.
+
+## What is still missing, and why it cannot be closed here
+
+- **No real dataset.** Everything is simulated, which is the strongest option
+  for *verifying methods* and worthless for showing they survive real data -
+  no non-exponential baseline hazard, no crossover, no missing covariates, no
+  protocol deviations. Closing it needs a dataset that cannot be shipped in a
+  repository.
+- **The CONSORT attrition is chosen, not observed.** No screening log, no
+  eligibility criteria, no site structure, no randomisation schedule or
+  allocation concealment, no blinding, no protocol document, no adverse-event
+  accounting. The *invariant* is enforced and is the part that generalises.
+- **No site structure to cluster on.** The clustered variance is implemented
+  and tested, and the primary analysis does not use it because this trial has
+  one site. Applying it anyway would report a correction for a correlation
+  that does not exist.
+- **The exact tie likelihood is not used in fitting**, only for comparison. It
+  is factorial in the tie size, which makes it impractical on any real event
+  time distribution - Efron exists for this reason and is the default.
+- **Fine-Gray uses a simplified IPCW scheme** - right-censoring-complete
+  weights, no left truncation, no time-varying weights. R's `cmprsk` handles
+  those and is not available offline.
+- **The PH test is a simplified Grambsch-Therneau** - correlation of unscaled
+  Schoenfeld residuals with ranked time, not the scaled residuals with the full
+  variance-covariance treatment.
+- **Stratified Cox pools per-stratum estimates by inverse variance** rather
+  than maximising a single stratified partial likelihood. Close for balanced
   strata, not identical.
-- **No bootstrap or robust standard errors**, and no clustering.
+- **No multiplicity handling, no interim analysis, no alpha spending.** The
+  p-values are nominal, and this trial has no interim looks to spend alpha on.
 
 ## Files
 
@@ -338,5 +401,7 @@ rather than quietly presenting a point estimate.
 | `src/consort.py` | participant flow, and the accounting invariant it enforces |
 | `run_ties.py` | Efron vs Breslow across event-time grids |
 | `write_report.py` | the generated statistical report |
+| `src/inference.py` | Brookmeyer-Crowley medians, sandwich variance, exact ties |
+| `tests/test_inference.py` | 18 tests: open bounds, when clustering helps, exact vs Efron |
 | `tests/test_ties_consort.py` | 16 tests: tie recovery, and six ways a CONSORT flow breaks |
 | `tests/test_survival.py` | 29 tests |

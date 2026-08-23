@@ -26,10 +26,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src
 
 import competing_risks as CR
 import consort as CS
+import inference as INF
 import simulate as SIM
 import survival as SV
 
 OUT_DOC = "docs/ANALYSIS_REPORT.md"
+
+
+def _med(ci):
+    """Median with its interval, or an explicit statement that it has none."""
+    if ci["median"] is None:
+        return "not reached"
+    hi = f"{ci['hi']:.1f}" if ci["hi"] is not None else "not reached"
+    lo = f"{ci['lo']:.1f}" if ci["lo"] is not None else "0.0"
+    return f"{ci['median']:.1f} ({lo}–{hi})"
 
 
 def _tied_fraction(time, event):
@@ -90,8 +100,9 @@ def main(n=900, seed=31):
     km1 = SV.kaplan_meier(t[arm == 1], e[arm == 1])
     km0 = SV.kaplan_meier(t[arm == 0], e[arm == 0])
     lr_chi2, lr_p, lr_obs, lr_exp = SV.logrank(t, e, arm)
-    med1 = SV.median_survival(km1[0], km1[1])
-    med0 = SV.median_survival(km0[0], km0[1])
+    ci1 = INF.median_survival_ci(km1[0], km1[1], km1[2], km1[3])
+    ci0 = INF.median_survival_ci(km0[0], km0[1], km0[2], km0[3])
+    med1, med0 = ci1["median"], ci0["median"]
 
     X = np.column_stack([arm, (np.asarray(d["age"]) - 62) / 10,
                          np.asarray(d["stage"])])
@@ -145,20 +156,24 @@ def main(n=900, seed=31):
     A("|---|---|---|")
     A(f"| n | {int((arm == 1).sum()):,} | {int((arm == 0).sum()):,} |")
     A(f"| events | {int(e[arm == 1].sum()):,} | {int(e[arm == 0].sum()):,} |")
-    A(f"| median survival (months) | {med1:.1f} | {med0:.1f} |")
+    A(f"| median survival (months) | {_med(ci1)} | {_med(ci0)} |")
     A("")
     A(f"Log-rank χ² = {lr_chi2:.2f} on 1 df, p = {lr_p:.2e} "
       f"(observed {lr_obs:.0f} vs expected {lr_exp:.1f} events in the "
       f"treatment arm).")
     A("")
-    A("Medians are read off the Kaplan–Meier step function as the first "
-      "time at which survival drops to or below 0.5. **No confidence interval "
-      "is given for the median**, and that is a gap rather than an oversight: "
-      "a median is a quantile of a step function, so its interval is not "
-      "symmetric and cannot be had by ±1.96 SE. It needs a Brookmeyer–Crowley "
-      "inversion of the Greenwood variance on the survival scale, which is not "
-      "implemented here. Quoting the point estimate alone is exactly the habit "
-      "this project criticises elsewhere, so it is flagged where it occurs.")
+    A("Intervals are **Brookmeyer–Crowley**, inverted from the Greenwood "
+      "variance on the log(−log S) scale. A median is a quantile of a step "
+      "function, so its sampling distribution is not symmetric and ±1.96 SE is "
+      "the wrong *shape*, not merely imprecise — the confidence set is every "
+      "time at which S(t)=0.5 would not be rejected. The log(−log) transform "
+      "is not decoration: a plain-scale interval can extend past 0 or 1, and an "
+      "interval containing “survival probability 1.04” tells the reader the "
+      "method was wrong rather than the data. An upper bound reported as "
+      "`None` means the confidence set is **open above**, which is the honest "
+      "answer when the curve never falls far enough to reject S(t)=0.5 later; "
+      "reporting the largest observed time instead would present a made-up "
+      "number as an estimate.")
     A("")
 
     A("## 3. Adjusted analysis: Cox proportional hazards")
@@ -242,6 +257,11 @@ def main(n=900, seed=31):
         "baseline. The methods are verified against a planted truth; nothing "
         "here shows they survive real data.",
         "**The CONSORT attrition is chosen, not observed** — see §1.",
+        "**Robust and clustered standard errors are available but not "
+        "applied to the primary analysis**, because this trial has no "
+        "site structure to cluster on — see src/inference.py, which "
+        "measures that clustering only widens the interval when the "
+        "covariate is CLUSTER-LEVEL.",
         "**No multiplicity handling**, no interim analysis, no alpha spending. "
         "The p-values are nominal.",
         "**Stratified Cox pools per-stratum estimates by inverse variance** "
