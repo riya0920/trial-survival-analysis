@@ -312,3 +312,154 @@ def _factorial(n):
     for k in range(2, n + 1):
         out *= k
     return out
+
+
+# ---------------------------------------------------------------------------
+# Grambsch-Therneau, properly: SCALED Schoenfeld residuals
+# ---------------------------------------------------------------------------
+
+def scaled_schoenfeld(res, cov, beta):
+    """Scale the raw Schoenfeld residuals: s* = beta + d * V @ s.
+
+    WHY SCALING IS NOT COSMETIC. A raw Schoenfeld residual is on the scale of
+    the COVARIATE; the scaled one is on the scale of the COEFFICIENT, and its
+    expectation at time t is beta(t). That is what makes the plot readable and
+    the test interpretable: a trend in s* is literally a trend in the hazard
+    ratio, and the slope is in log-hazard units.
+
+    The unscaled version in `survival.ph_test` correlates residuals with time
+    and gets the DIRECTION right, but its statistic is not the
+    Grambsch-Therneau one and cannot be quoted as such -- which the reference
+    audit measured before this existed: the ratio between them ranged over more
+    than an order of magnitude.
+
+    `d` is the number of events, `V` the covariance of beta.
+    """
+    res = np.asarray(res, dtype=float)
+    cov = np.atleast_2d(np.asarray(cov, dtype=float))
+    beta = np.asarray(beta, dtype=float)
+    return beta[None, :] + len(res) * (res @ cov.T)
+
+
+def _transform_time(times, how):
+    """cox.zph's time transforms. The CHOICE CHANGES THE ANSWER.
+
+    A test against raw time is dominated by the longest follow-up, where the
+    risk set is smallest and the residuals noisiest. `rank` and `km` spread the
+    weight over the observed event times instead, which is why they are the
+    usual defaults -- and why quoting a p-value without saying which transform
+    produced it is not quoting anything.
+    """
+    times = np.asarray(times, dtype=float)
+    if how == "identity":
+        return times
+    if how == "log":
+        return np.log(times)
+    if how == "rank":
+        return np.argsort(np.argsort(times)).astype(float)
+    raise ValueError("unknown time transform %r; use rank, identity or log"
+                     % how)
+
+
+def scaled_ph_test(time, event, X, beta, cov, transform="rank"):
+    """The real Grambsch-Therneau test, per covariate and globally.
+
+    Validated to agree with `lifelines.statistics.proportional_hazard_test`
+    exactly -- see `validate_reference.py`. `survival.ph_test` is kept as the
+    cheap screen it always was; this is the one whose number can be quoted.
+
+    Returns per-covariate chi2/p on 1 df, plus a GLOBAL test on p df. The
+    global one matters because testing three covariates separately at 0.05 and
+    reporting the smallest is a multiple-comparison problem, and the usual
+    reason a PH violation gets "found".
+    """
+    from math import erfc, sqrt
+
+    import survival as _S
+
+    res_t, res = _S.schoenfeld_residuals(time, event, X, beta)
+    n_events = len(res_t)
+    if n_events < 5:
+        return {"per_covariate": [], "n_events": n_events,
+                "transform": transform, "global": None}
+
+    beta = np.asarray(beta, dtype=float)
+    cov = np.atleast_2d(np.asarray(cov, dtype=float))
+    sstar = scaled_schoenfeld(res, cov, beta)
+
+    g = _transform_time(res_t, transform)
+    g = g - g.mean()
+    sg2 = float(np.sum(g ** 2))
+
+    per = []
+    for j in range(sstar.shape[1]):
+        num = float(g @ (sstar[:, j] - beta[j])) ** 2
+        den = n_events * float(cov[j, j]) * sg2
+        chi2 = num / den if den > 0 else 0.0
+        p = erfc(sqrt(chi2 / 2)) if chi2 > 0 else 1.0
+        per.append({"chi2": chi2, "p": p, "df": 1})
+
+    # GLOBAL test: the quadratic form over all covariates at once.
+    u = g @ (sstar - beta[None, :])              # p-vector
+    try:
+        inv = np.linalg.inv(cov)
+        gchi2 = float(u @ inv @ u) / (n_events * sg2)
+    except np.linalg.LinAlgError:                 # pragma: no cover
+        gchi2 = float("nan")
+    df = sstar.shape[1]
+    gp = _chi2_sf(gchi2, df) if np.isfinite(gchi2) else float("nan")
+
+    return {"per_covariate": per, "n_events": n_events,
+            "transform": transform,
+            "global": {"chi2": gchi2, "p": gp, "df": df},
+            "scaled_residuals": sstar, "times": res_t}
+
+
+def _chi2_sf(x, df):
+    """Upper tail of a chi-square. Series/continued-fraction, no scipy.
+
+    Written out rather than imported because `src/` has no third-party
+    dependency -- the reference libraries are used to AUDIT this code, never to
+    provide it.
+    """
+    from math import exp, lgamma, log
+
+    if x <= 0:
+        return 1.0
+    a = df / 2.0
+    xx = x / 2.0
+    if xx < a + 1.0:
+        # lower incomplete gamma by series
+        term = 1.0 / a
+        total = term
+        n = 0
+        while n < 1000:
+            n += 1
+            term *= xx / (a + n)
+            total += term
+            if abs(term) < abs(total) * 1e-15:
+                break
+        lower = total * exp(-xx + a * log(xx) - lgamma(a))
+        return max(0.0, min(1.0, 1.0 - lower))
+    # upper incomplete gamma by continued fraction (Lentz)
+    tiny = 1e-300
+    b = xx + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for i in range(1, 1000):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < tiny:
+            d = tiny
+        c = b + an / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-15:
+            break
+    upper = h * exp(-xx + a * log(xx) - lgamma(a))
+    return max(0.0, min(1.0, upper))

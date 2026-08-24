@@ -93,6 +93,9 @@ REFS = [
     ("median point", "lifelines median_survival_time_"),
     ("median CI lower", "lifelines median_survival_times"),
     ("median CI upper", "lifelines median_survival_times"),
+    ("scaled PH chi2", "lifelines proportional_hazard_test"),
+    ("scaled PH p", "lifelines proportional_hazard_test"),
+    ("chi2 survival function", "scipy.stats.chi2.sf"),
 ]
 
 
@@ -166,6 +169,35 @@ def run(seeds=SEEDS, n=N):
         if mc["hi"] is not None and np.isfinite(ref_ci[1]):
             note("median CI upper", abs(mc["hi"] - ref_ci[1]))
 
+        # -- the REAL Grambsch-Therneau, on SCALED residuals ------------------
+        # This one is expected to match, and does. The scaled residual is on
+        # the scale of the COEFFICIENT rather than the covariate, which is what
+        # makes the statistic the Grambsch-Therneau one and not merely
+        # something correlated with it.
+        scaled = INF.scaled_ph_test(T, E, X, beta, cov, transform="rank")
+        ref_gt = proportional_hazard_test(cph, df,
+                                          time_transform="rank").summary
+        for i, nm in enumerate(NAMES):
+            note("scaled PH chi2",
+                 _rel(scaled["per_covariate"][i]["chi2"],
+                      float(ref_gt.loc[nm, "test_statistic"])))
+            note("scaled PH p",
+                 _rel(scaled["per_covariate"][i]["p"],
+                      float(ref_gt.loc[nm, "p"])))
+
+        # -- the hand-rolled chi-square tail ---------------------------------
+        # `src/` has no scipy dependency, so the upper tail is written out.
+        # That is a claim about numerics and gets checked like one.
+        try:
+            from scipy.stats import chi2 as _chi2
+            for dfree in (1, 3):
+                for x in (0.5, 2.0, 7.5, 20.0):
+                    note("chi2 survival function",
+                         _rel(INF._chi2_sf(x, dfree),
+                              float(_chi2.sf(x, dfree))))
+        except ImportError:                      # pragma: no cover
+            pass
+
         # -- proportional-hazards test: DECISIONS, not numbers -----------------
         # `ph_test` is the Grambsch-Therneau IDEA in its simplest form and uses
         # UNSCALED residuals, so it is not expected to match numerically. What
@@ -229,7 +261,16 @@ def main():
     w("")
     w("## The proportional-hazards test is checked differently")
     w("")
-    w("`ph_test` implements the Grambsch-Therneau idea in its simplest form,")
+    w("There are now TWO proportional-hazards tests, and only one of them is")
+    w("expected to match.")
+    w("")
+    w("`inference.scaled_ph_test` is the real Grambsch-Therneau, on SCALED")
+    w("Schoenfeld residuals -- the scaled residual is on the scale of the")
+    w("COEFFICIENT rather than the covariate, so its expectation at time t is")
+    w("beta(t). It agrees with the reference to the tolerance in the table")
+    w("above, for the statistic AND the p-value.")
+    w("")
+    w("`survival.ph_test` implements the Grambsch-Therneau idea in its simplest form,")
     w("correlating UNSCALED Schoenfeld residuals with ranked time. It is not")
     w("expected to reproduce the reference statistic, and it does not: over")
     w("these seeds the ratio of test statistics ranged from **%.3f to %.3f**."

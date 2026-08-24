@@ -13,7 +13,7 @@ analysed wrongly and then correctly, where treatment provably does nothing.
 python run_analysis.py     # Table 1, KM, Cox, PH, immortal time -> out/*.png
 python run_ties.py --reps 60   # Efron vs Breslow against a planted HR
 python write_report.py         # -> docs/ANALYSIS_REPORT.md
-python -m pytest tests -q      # 73 tests
+python -m pytest tests -q      # 86 tests
 python validate_reference.py   # audit vs lifelines/statsmodels -> docs/
 ```
 
@@ -422,6 +422,63 @@ hazard ratio. It remains a reason not to quote the p-value.
 places a reference appears, and both skip cleanly when it is absent, so the
 project still runs with no third-party survival library installed.
 
+## The proportional-hazards test, done properly
+
+There are now **two** PH tests here, and only one of them is meant to match a
+reference.
+
+`survival.ph_test` correlates **unscaled** Schoenfeld residuals with ranked
+time. It gets the direction right, and the reference audit measured exactly how
+far that falls short: it agreed with `lifelines` on 29 of 30 decisions while its
+statistic ranged **0.07 to 2.65 times** the reference's. A screen, not a
+quotable test.
+
+`inference.scaled_ph_test` is the real Grambsch-Therneau:
+
+| quantity | worst disagreement vs `lifelines` |
+|---|---|
+| scaled PH chi² | **5.1e-06** |
+| scaled PH p-value | **5.1e-06** |
+
+### Why scaling is not cosmetic
+
+A raw Schoenfeld residual is on the scale of the **covariate** and centres on
+zero — it carries no information about the size of the coefficient. The scaled
+residual
+
+```
+s* = β + d · V · s
+```
+
+is on the scale of the **coefficient**, so its expectation at time *t* is
+literally β(*t*). That is what makes the plot readable and the slope
+interpretable in log-hazard units. Two tests pin the contrast: the scaled
+residuals average to β, the unscaled ones average to zero.
+
+### Two things it adds beyond matching
+
+**A global test.** Testing three covariates separately at 0.05 and reporting
+the smallest p is a multiple-comparison problem, and it is the usual way a PH
+violation gets "found". The global test is a quadratic form on *p* degrees of
+freedom.
+
+**The time transform is a parameter, and it changes the answer.** A test
+against raw time is dominated by the longest follow-up, where the risk set is
+smallest and the residuals noisiest. Quoting a PH p-value without naming the
+transform is not quoting anything, so `rank`, `identity` and `log` are all
+available and an unknown one is refused rather than defaulted.
+
+### The chi-square tail is hand-rolled too
+
+`src/` has no scipy dependency — the reference libraries **audit** this code,
+they never provide it. So the upper tail of the chi-square is written out as a
+series and continued fraction, which is a claim about numerics and is checked
+like one: **2.7e-14** against `scipy.stats.chi2.sf`.
+
+A test also asserts that `ph_test` **still does not match**. If it ever starts
+agreeing exactly, somebody has quietly replaced it with the scaled version and
+the documented distinction between a screen and a test has stopped being true.
+
 ## What is still missing, and why it cannot be closed here
 
 - **No real dataset.** Everything is simulated, which is the strongest option
@@ -443,11 +500,11 @@ project still runs with no third-party survival library installed.
 - **Fine-Gray uses a simplified IPCW scheme** - right-censoring-complete
   weights, no left truncation, no time-varying weights. R's `cmprsk` handles
   those and is not available offline.
-- **The PH test is a simplified Grambsch-Therneau** - correlation of unscaled
-  Schoenfeld residuals with ranked time, not the scaled residuals with the full
-  variance-covariance treatment. Now *quantified* rather than just disclosed:
-  it agrees with the reference on 29/30 decisions but its statistic ranges
-  0.07-2.65 times the reference's, so it screens, it does not quote.
+- **The scaled PH test covers one transform family and no strata.**
+  `scaled_ph_test` is the real Grambsch-Therneau and matches the reference (see
+  above), but it offers `rank`/`identity`/`log` and not the Kaplan-Meier
+  transform, and it has no stratified variant — a violation confined to one
+  stratum can hide in a pooled test.
 - **Stratified Cox pools per-stratum estimates by inverse variance** rather
   than maximising a single stratified partial likelihood. Close for balanced
   strata, not identical.
@@ -470,6 +527,7 @@ project still runs with no third-party survival library installed.
 | `write_report.py` | the generated statistical report |
 | `src/inference.py` | Brookmeyer-Crowley medians, sandwich variance, exact ties |
 | `validate_reference.py` | audit vs lifelines/statsmodels; found the median-CI bug |
+| `tests/test_scaled_ph.py` | 13 tests: scaling, global test, chi2 tail |
 | `tests/test_reference.py` | 10 tests: skip cleanly when no reference is installed |
 | `tests/test_inference.py` | 18 tests: open bounds, when clustering helps, exact vs Efron |
 | `tests/test_ties_consort.py` | 16 tests: tie recovery, and six ways a CONSORT flow breaks |

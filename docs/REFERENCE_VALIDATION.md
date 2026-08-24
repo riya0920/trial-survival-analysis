@@ -25,6 +25,9 @@ with no third-party survival library present.
 | `median point` | lifelines median_survival_time_ | 0.00e+00 |
 | `median CI lower` | lifelines median_survival_times | 0.00e+00 |
 | `median CI upper` | lifelines median_survival_times | 0.00e+00 |
+| `scaled PH chi2` | lifelines proportional_hazard_test | 5.09e-06 |
+| `scaled PH p` | lifelines proportional_hazard_test | 5.12e-06 |
+| `chi2 survival function` | scipy.stats.chi2.sf | 2.72e-14 |
 
 Relative difference, except the median CI bounds, which are absolute (in
 months) because the bounds are event times rather than ratios.
@@ -36,7 +39,16 @@ that discriminates.
 
 ## The proportional-hazards test is checked differently
 
-`ph_test` implements the Grambsch-Therneau idea in its simplest form,
+There are now TWO proportional-hazards tests, and only one of them is
+expected to match.
+
+`inference.scaled_ph_test` is the real Grambsch-Therneau, on SCALED
+Schoenfeld residuals -- the scaled residual is on the scale of the
+COEFFICIENT rather than the covariate, so its expectation at time t is
+beta(t). It agrees with the reference to the tolerance in the table
+above, for the statistic AND the p-value.
+
+`survival.ph_test` implements the Grambsch-Therneau idea in its simplest form,
 correlating UNSCALED Schoenfeld residuals with ranked time. It is not
 expected to reproduce the reference statistic, and it does not: over
 these seeds the ratio of test statistics ranged from **0.070 to 2.654**.
