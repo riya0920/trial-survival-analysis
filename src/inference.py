@@ -99,7 +99,8 @@ def median_survival_ci(times, surv, n_risk, n_event, alpha=0.05):
     below = np.where(surv <= 0.5)[0]
     median = float(times[below[0]]) if len(below) else None
 
-    lo = hi = None
+    lo = None
+    hi_idx = None
     for i, (t, s) in enumerate(zip(times, surv)):
         if not (0 < s < 1):
             continue
@@ -113,7 +114,31 @@ def median_survival_ci(times, surv, n_risk, n_event, alpha=0.05):
         if abs(ll - target) <= z * se_ll:
             if lo is None:
                 lo = float(t)
-            hi = float(t)
+            hi_idx = i
+
+    # THE UPPER BOUND IS THE NEXT EVENT TIME, NOT THE LAST ACCEPTED ONE.
+    # The confidence set is a set of TIMES, and the KM curve is a step function
+    # holding its value on the half-open interval [t_i, t_{i+1}). So if S(t_i)
+    # is in the acceptance region, EVERY t in [t_i, t_{i+1}) is in the set, and
+    # the supremum of the set is t_{i+1}.
+    #
+    # Reporting t_i instead understates the upper bound by one event-time step.
+    # That is the ANTI-CONSERVATIVE direction -- a narrower interval than the
+    # data support -- which is why it is worth a comment and not just a fix.
+    # Found by differencing against lifelines: the lower bound agreed exactly on
+    # every seed while the upper was short by exactly one step on every seed,
+    # and an error that is asymmetric like that is a convention, not noise.
+    #
+    # The LOWER bound needs no such adjustment, and the asymmetry is the same
+    # fact seen from the other end: the step at t_i makes the set closed below
+    # (t_i itself is in it) and open above.
+    if hi_idx is None:
+        hi = None
+    elif hi_idx + 1 < len(times):
+        hi = float(times[hi_idx + 1])
+    else:
+        # The set runs to the last event time; nothing after it bounds the set.
+        hi = None
 
     # An upper bound equal to the last event time is only a real bound if the
     # curve actually fell below 0.5 after it. Otherwise the set is open above.

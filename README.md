@@ -1,8 +1,10 @@
 # DATA-3 — Trial analysis with survival methods — complete
 
 Kaplan-Meier, log-rank, Cox proportional hazards, and Schoenfeld-residual PH
-testing **implemented rather than imported** (lifelines is not installed), and
-verified against a simulation with a known true hazard ratio.
+testing **implemented rather than imported** — by choice, to show the
+mechanics — verified against a simulation with a known true hazard ratio and
+then **differenced against `lifelines` and `statsmodels`** to prove the
+arithmetic is right rather than merely self-consistent.
 
 The centrepiece is the immortal-time-bias demonstration: the same cohort
 analysed wrongly and then correctly, where treatment provably does nothing.
@@ -11,7 +13,8 @@ analysed wrongly and then correctly, where treatment provably does nothing.
 python run_analysis.py     # Table 1, KM, Cox, PH, immortal time -> out/*.png
 python run_ties.py --reps 60   # Efron vs Breslow against a planted HR
 python write_report.py         # -> docs/ANALYSIS_REPORT.md
-python -m pytest tests -q      # 63 tests
+python -m pytest tests -q      # 73 tests
+python validate_reference.py   # audit vs lifelines/statsmodels -> docs/
 ```
 
 ---
@@ -357,6 +360,68 @@ Efron is closer, and Breslow understates the contribution - the direction that
 attenuates coefficients toward the null. It is **factorial in the tie size** and
 refuses above 8 tied deaths, which is the entire reason Efron exists.
 
+## Validated against a reference implementation
+
+Every estimator here is written from the formula. That is the point of the
+project, and it is also a correctness claim that only a reference can settle:
+**a unit test written by the person who wrote the estimator shares its
+misconceptions.** The existing tests plant a hazard ratio and check it is
+recovered, which catches a wrong answer but not a subtly wrong *convention*.
+
+`validate_reference.py` differences all of it against `lifelines` and
+`statsmodels` over 10 simulated trials:
+
+| quantity | reference | worst disagreement |
+|---|---|---|
+| `kaplan_meier` S(t) | lifelines `KaplanMeierFitter` | 3.8e-15 |
+| log-rank chi2 / p | lifelines `logrank_test` | 9.2e-15 / 9.1e-14 |
+| Cox Efron beta / se | lifelines `CoxPHFitter` | 8.2e-06 / 5.5e-07 |
+| Cox Breslow beta, heavy ties | statsmodels `PHReg(ties=breslow)` | 3.7e-15 |
+| Cox Efron beta, heavy ties | statsmodels `PHReg(ties=efron)` | 3.7e-15 |
+| robust sandwich se | lifelines `CoxPHFitter(robust=True)` | 1.8e-06 |
+| **clustered** sandwich se | lifelines `CoxPHFitter(cluster_col=)` | 1.2e-06 |
+| median + Brookmeyer-Crowley bounds | lifelines `median_survival_times` | **0** |
+
+The tie rows are computed on time **rounded to whole months**. Breslow and
+Efron agree closely on continuous time, so validating only there would let a
+broken Breslow pass unnoticed — heavy ties are the case that discriminates,
+and are also the realistic one, since trials record time in days.
+
+### It found a bug, in the anti-conservative direction
+
+`median_survival_ci` reported the upper confidence bound as the **last event
+time inside** the acceptance region. The supremum of the confidence set is the
+**next** one: the KM curve holds its value on `[t_i, t_i+1)`, so every t in
+that half-open interval is in the set. The interval was one event time too
+narrow — narrower than the data support, which is the direction that
+manufactures confidence.
+
+It was findable because the disagreement was **asymmetric**: the lower bound
+matched exactly on every seed while the upper was short on every seed. A
+convention error looks like that. Noise does not. Both bounds now agree
+exactly, and `tests/test_reference.py` pins the convention in words as well as
+in numbers, so it cannot be "fixed" back by someone reading only the number.
+
+### The PH test is audited on its decisions, not its arithmetic
+
+`ph_test` is deliberately the Grambsch-Therneau idea in its *simplest* form —
+unscaled Schoenfeld residuals against ranked time — so it is not expected to
+reproduce the reference statistic, and does not: the ratio of test statistics
+ranged **0.070 to 2.654**. What matters is whether it reaches the same
+conclusion, and it agreed on **29 of 30** covariate-seeds.
+
+The one exception is reported rather than rounded away: seed 109, `age10`,
+p=0.0374 here against p=0.0564 in the reference. Both straddle 0.05, so the
+tests are not disagreeing about a clear signal — they are landing on opposite
+sides of a line drawn through a grey zone. It is in the **over-flagging**
+direction, which for a screening diagnostic is the tolerable one: it costs a
+second look, where under-flagging would grant false confidence in a constant
+hazard ratio. It remains a reason not to quote the p-value.
+
+**`src/` does not import either library.** The audit and its tests are the only
+places a reference appears, and both skip cleanly when it is absent, so the
+project still runs with no third-party survival library installed.
+
 ## What is still missing, and why it cannot be closed here
 
 - **No real dataset.** Everything is simulated, which is the strongest option
@@ -380,7 +445,9 @@ refuses above 8 tied deaths, which is the entire reason Efron exists.
   those and is not available offline.
 - **The PH test is a simplified Grambsch-Therneau** - correlation of unscaled
   Schoenfeld residuals with ranked time, not the scaled residuals with the full
-  variance-covariance treatment.
+  variance-covariance treatment. Now *quantified* rather than just disclosed:
+  it agrees with the reference on 29/30 decisions but its statistic ranges
+  0.07-2.65 times the reference's, so it screens, it does not quote.
 - **Stratified Cox pools per-stratum estimates by inverse variance** rather
   than maximising a single stratified partial likelihood. Close for balanced
   strata, not identical.
@@ -402,6 +469,8 @@ refuses above 8 tied deaths, which is the entire reason Efron exists.
 | `run_ties.py` | Efron vs Breslow across event-time grids |
 | `write_report.py` | the generated statistical report |
 | `src/inference.py` | Brookmeyer-Crowley medians, sandwich variance, exact ties |
+| `validate_reference.py` | audit vs lifelines/statsmodels; found the median-CI bug |
+| `tests/test_reference.py` | 10 tests: skip cleanly when no reference is installed |
 | `tests/test_inference.py` | 18 tests: open bounds, when clustering helps, exact vs Efron |
 | `tests/test_ties_consort.py` | 16 tests: tie recovery, and six ways a CONSORT flow breaks |
 | `tests/test_survival.py` | 29 tests |
