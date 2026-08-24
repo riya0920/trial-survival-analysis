@@ -1,4 +1,4 @@
-# DATA-3 — Trial analysis with survival methods — complete
+# DATA-3 — Trial analysis with survival methods — working system, 8 known gaps
 
 Kaplan-Meier, log-rank, Cox proportional hazards, and Schoenfeld-residual PH
 testing **implemented rather than imported** — by choice, to show the
